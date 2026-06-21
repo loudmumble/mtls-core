@@ -1,0 +1,5 @@
+# Never commit key/cert material — these are secrets, generated at deploy time.
+*.crt
+*.key
+*.pem
+/build/
