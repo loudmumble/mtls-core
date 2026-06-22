@@ -3,13 +3,14 @@
 // packages directly; Python/Node load the .crt/.key files).
 //
 //	mtls init-ca --org NAME --dir DIR [--days 3650]
-//	mtls issue   --dir DIR --name NAME [--dns a,b] [--ip <ip-list>] [--out DIR] [--days 825]
+//	mtls issue   --dir DIR --name NAME [--dns a,b] [--ip <ip-list>] [--uri spiffe://fleet/agent/NAME] [--out DIR] [--days 825]
 package main
 
 import (
 	"flag"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,7 @@ func issue(args []string) {
 	name := fs.String("name", "", "service name (CommonName + output filename)")
 	dns := fs.String("dns", "localhost", "comma-separated DNS SANs")
 	ips := fs.String("ip", "", "comma-separated IP SANs")
+	uris := fs.String("uri", "", "comma-separated URI SANs (e.g. spiffe://fleet/agent/athena)")
 	out := fs.String("out", "", "output directory (default: --dir)")
 	days := fs.Int("days", 825, "validity in days")
 	_ = fs.Parse(args)
@@ -93,7 +95,17 @@ func issue(args []string) {
 		}
 	}
 
-	certPEM, keyPEM, err := ca.Issue(*name, splitCSV(*dns), ipList, time.Duration(*days)*24*time.Hour)
+	var uriList []*url.URL
+	for _, s := range splitCSV(*uris) {
+		u, perr := url.Parse(s)
+		if perr != nil || u.Scheme == "" {
+			fmt.Fprintf(os.Stderr, "warning: skipping invalid URI %q\n", s)
+			continue
+		}
+		uriList = append(uriList, u)
+	}
+
+	certPEM, keyPEM, err := ca.IssueURI(*name, splitCSV(*dns), ipList, uriList, time.Duration(*days)*24*time.Hour)
 	check(err)
 	check(certgen.WriteFile(filepath.Join(*out, *name+".crt"), certPEM))
 	check(certgen.WriteFile(filepath.Join(*out, *name+".key"), keyPEM))

@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,4 +85,85 @@ func versionOf(r *http.Response) uint16 {
 		return 0
 	}
 	return r.TLS.Version
+}
+
+// TestPeerIdentity proves channel-binding: the server derives identity from the
+// peer cert it OBSERVES on the handshake — CN when there is no URI SAN, the URI
+// SAN's last segment when present — plus a stable SPKI pin, and fails closed
+// when there is no peer cert.
+func TestPeerIdentity(t *testing.T) {
+	ca, err := certgen.NewCA("test-fleet", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvCert, srvKey, err := ca.Issue("server", []string{"localhost"}, []net.IP{net.IPv4(127, 0, 0, 1)}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvCfg, err := ServerConfig(srvCert, srvKey, ca.Pool())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server echoes the identity it observes from the peer certificate.
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, err := PeerIdentity(r.TLS)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, id.Name+"|"+id.URI+"|"+id.SPKIFingerprint)
+	}))
+	ts.TLS = srvCfg
+	ts.StartTLS()
+	defer ts.Close()
+
+	call := func(cert, key []byte) []string {
+		t.Helper()
+		cfg, err := ClientConfig(cert, key, ca.Pool(), "localhost")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := (&http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}).Get(ts.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return strings.SplitN(string(b), "|", 3)
+	}
+
+	// 1) CN fallback — cert with CN=athena, no URI SAN (today's fleet certs).
+	cnCert, cnKey, err := ca.Issue("athena", nil, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := call(cnCert, cnKey)
+	if got[0] != "athena" {
+		t.Fatalf("CN-fallback name = %q, want athena", got[0])
+	}
+	if got[1] != "" {
+		t.Fatalf("expected empty URI for a CN-only cert, got %q", got[1])
+	}
+	if len(got[2]) != 64 {
+		t.Fatalf("SPKI fingerprint = %q (len %d), want 64 hex chars", got[2], len(got[2]))
+	}
+
+	// 2) URI SAN — spiffe://fleet/agent/athena resolves Name to the last segment.
+	u, _ := url.Parse("spiffe://fleet/agent/athena")
+	uriCert, uriKey, err := ca.IssueURI("athena-leaf", nil, nil, []*url.URL{u}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = call(uriCert, uriKey)
+	if got[0] != "athena" {
+		t.Fatalf("URI-derived name = %q, want athena", got[0])
+	}
+	if got[1] != "spiffe://fleet/agent/athena" {
+		t.Fatalf("URI = %q, want spiffe://fleet/agent/athena", got[1])
+	}
+
+	// 3) Fail closed — no peer certificate / no connection state.
+	if _, err := PeerIdentity(nil); err == nil {
+		t.Fatal("PeerIdentity(nil) must error (fail closed)")
+	}
 }

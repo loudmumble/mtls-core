@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -115,6 +116,14 @@ func (ca *CA) PEM() (certPEM, keyPEM []byte, err error) {
 // client auth (every fleet service is both). cn is the CommonName; dnsNames and
 // ips are the Subject Alternative Names the cert is valid for.
 func (ca *CA) Issue(cn string, dnsNames []string, ips []net.IP, validity time.Duration) (certPEM, keyPEM []byte, err error) {
+	return ca.IssueURI(cn, dnsNames, ips, nil, validity)
+}
+
+// IssueURI is Issue with URI Subject Alternative Names, used to carry a stable,
+// CA-issued workload identity (e.g. spiffe://<trust-domain>/agent/<name>). The
+// URI SAN is authoritative because only the CA can sign it; consumers read it
+// back via mtls.PeerIdentity. uris may be nil (equivalent to Issue).
+func (ca *CA) IssueURI(cn string, dnsNames []string, ips []net.IP, uris []*url.URL, validity time.Duration) (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -133,6 +142,7 @@ func (ca *CA) Issue(cn string, dnsNames []string, ips []net.IP, validity time.Du
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		DNSNames:     dnsNames,
 		IPAddresses:  ips,
+		URIs:         uris,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.Key)
 	if err != nil {
